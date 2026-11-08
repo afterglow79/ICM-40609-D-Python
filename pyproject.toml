@@ -4,14 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "icm40609"
-version = "0.1.0"
+version = "0.2.0"
 description = "Board-independent ICM-40609-D accelerometer and gyroscope driver"
 readme = "README.md"
 requires-python = ">=3.9"
 
+[project.scripts]
+icm40609 = "icm40609.cli:main"
+
 [project.optional-dependencies]
 i2c = ["smbus2>=0.4.3"]
 spi = ["spidev>=3.6; sys_platform == 'linux'"]
+gpio = ["gpiozero>=2.0", "lgpio>=0.2.2; sys_platform == 'linux'"]
 test = ["pytest>=7"]
 
 [tool.setuptools.packages.find]

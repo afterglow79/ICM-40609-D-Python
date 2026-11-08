@@ -6,8 +6,11 @@ from icm40609 import ICM40609, I2CTransport, InvalidSampleError
 
 def main():
     with SMBus(1) as bus:
-        imu = ICM40609(I2CTransport(bus, address=0x68))
+        # Check both possible addresses, including after the chip resets.
+        transport = I2CTransport(bus, address=None)
+        imu = ICM40609(transport)
         imu.initialize(accel_range_g=16, gyro_range_dps=2000, odr_hz=100)
+        print(f"Connected to ICM-40609-D at 0x{transport.address:02X}")
         try:
             while True:
                 if imu.data_ready():
