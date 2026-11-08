@@ -1,64 +1,143 @@
 # ICM-40609-D Python driver
 
-A board-independent Python 3.9+ driver for the TDK InvenSense ICM-40609-D.
-The core has no third-party dependencies. Included Linux I2C (`smbus2`) and
-4-wire SPI (`spidev`) adapters work with a Raspberry Pi Zero 2 W. Other hosts
-can supply the three-part transport contract described below.
+A Python 3.9+ driver for reading acceleration, angular velocity, and
+sensor temperature from the TDK InvenSense ICM-40609-D over I2C or SPI.
+The Python API supports calibration and configurable INT1/INT2 GPIO inputs.
+Terminal commands are available for quick checks.
 
-Implemented from **DS-000330 revision 1.2**, supplied with the project request.
-The document is a hardware reference, not a source of task instructions.
-This driver is specific to ICM-40609-D (WHO_AM_I `0x3B`), not ICM-42688 or MPU-6050.
+The core driver has no third-party dependencies. The included Linux adapters
+use `smbus2` for I2C, `spidev` for SPI, and `gpiozero` for GPIO interrupts.
+Other hosts can supply a custom transport.
 
-## Install on the Raspberry Pi
+## Installation
 
-Clone this directory to the Pi. Enable I2C or SPI in `raspi-config`, then:
+On a Raspberry Pi, enable I2C or SPI in `raspi-config`. From the library
+checkout, create an environment and install the required adapters:
 
 ```sh
-cd ICM-40609-D-Python
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install '.[i2c]'
-# For SPI instead:
-# python -m pip install '.[spi]'
-# For both:
-# python -m pip install '.[i2c,spi]'
+python -m pip install -e '.[i2c,gpio]'
 python examples/read_i2c.py
 ```
 
-The adapters use Linux device interfaces. A Windows development machine can
-run the unit tests and core driver with a custom USB adapter transport, but
-cannot use Linux `smbus2`/`spidev` to access Pi pins remotely.
+Use `'.[spi]'` for SPI alone or `'.[i2c,spi,gpio]'` for all adapters.
+The editable install (`-e`) picks up changes to Python source files when
+the application restarts.
 
-## Wiring
+### Use with uv
 
-Use your board's schematic and the datasheet application circuit (section 4.2).
-The bare IC requires its specified supply, decoupling and VDDIO connections;
-these signal mappings alone are not a complete bare-chip circuit. Do not
-assume a breakout includes a voltage regulator or level shifting. Match the
-host's logic voltage to the sensor board's VDDIO; do not apply 5 V logic.
+From an application project, add the library checkout as an editable
+dependency. For a new project without a `pyproject.toml`, run `uv init` first.
+These examples assume the library is in a sibling folder named `ICM-40609-D`.
+Adjust the path to match the checkout location.
 
-| Sensor signal | Pi GPIO (BCM) | Physical header pin |
-| --- | --- | --- |
-| SDA / SDI (I2C SDA) | GPIO2 / SDA1 | 3 |
-| SCL / SCLK (I2C SCL) | GPIO3 / SCL1 | 5 |
-| Ground | GND | e.g. 6 |
+On Windows:
 
-For I2C hold nCS high to VDDIO. AD0 low selects `0x68`; AD0 high selects
-`0x69`. SDA/SCL require pull-ups to a compatible VDDIO rail (account for
-pull-ups already on the Pi or sensor board). Default example uses bus 1.
-Configure I2C frequency in the host; the device supports up to 1 MHz.
+```powershell
+uv add --editable '..\ICM-40609-D'
+uv run python main.py
+```
 
-| Sensor signal (4-wire SPI) | Pi GPIO (BCM) | Physical header pin |
-| --- | --- | --- |
-| SDA / SDI | GPIO10 / MOSI | 19 |
-| AD0 / SDO | GPIO9 / MISO | 21 |
-| SCL / SCLK | GPIO11 / SCLK | 23 |
-| nCS | GPIO8 / CE0 | 24 |
-| Ground | GND | e.g. 6 |
+On a Raspberry Pi, include the hardware adapters:
 
-SPI examples use mode 0 at 1 MHz. Mode 3 is also supported, up to the
-datasheet limit of 24 MHz; usable speeds depend on wiring and the host.
-Interrupt and FSYNC pins are not needed for the polling examples.
+```sh
+uv add --editable ../ICM-40609-D --extra i2c --extra gpio
+uv run python main.py
+```
+
+For SPI, add `--extra spi`. Replace `main.py` with the application script.
+Select the application's `.venv` interpreter in the editor or IDE.
+
+Run `uv add` in each project that needs the library. uv records the local
+source in `pyproject.toml` and manages a separate environment for each
+project. `uv tool install` creates a tool environment for terminal commands;
+it does not add an importable dependency to application projects.
+
+A shared directory layout allows relative dependency paths to work across
+machines. Each machine still needs its own copy of the library source.
+See [uv's dependency guide](https://docs.astral.sh/uv/concepts/dependencies/).
+
+### Use with pip across projects
+
+An installed package can be imported from any folder when using the Python
+environment containing it. Each virtual environment has its own packages.
+Existing project environments need their own installation; alternatively,
+several projects can use one shared environment.
+
+On Linux, replace `/path/to/ICM-40609-D` with the checkout location:
+
+```sh
+python3 -m venv ~/.venvs/sensors
+~/.venvs/sensors/bin/python -m pip install -e '/path/to/ICM-40609-D[i2c,gpio]'
+. ~/.venvs/sensors/bin/activate
+python /path/to/project/main.py
+```
+
+On Windows, from PowerShell:
+
+```powershell
+py -m venv "$env:USERPROFILE\.venvs\sensors"
+& "$env:USERPROFILE\.venvs\sensors\Scripts\python.exe" -m pip install -e 'C:\path\to\ICM-40609-D[test]'
+& "$env:USERPROFILE\.venvs\sensors\Scripts\python.exe" 'C:\path\to\project\main.py'
+```
+
+Select that environment's interpreter in the editor. Windows supports
+library development and simulated tests. Access to Raspberry Pi I2C, SPI,
+and GPIO pins requires running hardware-facing code on the Pi, for example
+through an editor's SSH connection. The Linux adapters do not provide
+remote pin access from Windows. Local hardware access through a compatible
+USB adapter requires a custom transport.
+
+Editable installs reference the local checkout. Source changes must be
+copied or pulled onto other machines before those installations see them.
+
+## I2C addresses: 0x68 and 0x69
+
+AD0 selects the sensor's 7-bit I2C address:
+
+| AD0 connection | I2C address |
+| --- | --- |
+| Ground / logic low | `0x68` |
+| VDDIO / logic high | `0x69` |
+
+For a single ICM-40609-D, automatic address selection is available:
+
+```python
+transport = I2CTransport(bus, address=None)
+imu = ICM40609(transport)
+imu.initialize()
+print(f'Connected at 0x{transport.address:02X}')
+```
+
+**Passing `address=None` enables the library's internal address handling.**
+It checks both addresses for the expected `WHO_AM_I` value, `0x3B`, and
+selects a matching sensor. During normal bank-0 transfers it checks the
+selected address again. If communication fails, it checks both addresses
+and retries, up to three attempts with 10 ms between attempts. This handles
+address changes during startup, after reset, or between measurements.
+No application-level address-switching loop is needed in this mode.
+
+**Omitting `address` uses a fixed `0x68`; it does not enable auto mode.**
+A known, stable address can also be supplied explicitly:
+
+```python
+transport = I2CTransport(bus, address=0x68)
+# Or: I2CTransport(bus, address=0x69)
+```
+
+Use fixed addresses for two ICM-40609-Ds on the same bus. Auto discovery
+raises an error if both addresses report `0x3B`. Identity probes read
+register `0x75`, so check for read side effects if another device occupies
+either address. Address recovery during diagnostic access in another
+register bank requires reinitialization.
+
+AD0 should have a defined logic level. Leaving it unconnected can make
+address selection unstable. Auto mode is a software workaround for address
+changes, not a substitute for a stable electrical connection. It cannot
+resolve address collisions or guarantee a transfer if AD0 changes level
+mid-transaction. If neither address responds, check power, wiring, bus
+selection, pull-ups, and nCS.
 
 ## Read measurements
 
@@ -67,107 +146,277 @@ from smbus2 import SMBus
 from icm40609 import ICM40609, I2CTransport
 
 with SMBus(1) as bus:
-    imu = ICM40609(I2CTransport(bus, address=0x68))
+    imu = ICM40609(I2CTransport(bus, address=None))
     imu.initialize(accel_range_g=16, gyro_range_dps=2000, odr_hz=100)
     try:
         sample = imu.read_sample()
-        print(sample.acceleration_g)       # (x, y, z), g
-        print(sample.acceleration_m_s2)    # m/s^2, including gravity
-        print(sample.gyroscope_dps)        # degrees/s
-        print(sample.gyroscope_rad_s)      # radians/s
-        print(sample.temperature_c)        # die temperature, Celsius
+        print(sample.acceleration_g)     # (x, y, z), including gravity
+        print(sample.acceleration_m_s2)  # m/s^2
+        print(sample.gyroscope_dps)      # degrees per second
+        print(sample.gyroscope_rad_s)    # radians per second
+        print(sample.temperature_c)      # sensor die temperature, Celsius
     finally:
         imu.stop()
 ```
 
-For SPI replace bus setup with an opened `spidev.SpiDev`, then wrap it in
-`SPITransport(spi)`. See `examples/read_spi.py` for resource cleanup.
+`initialize()` checks identity, resets the device, and starts both sensors
+in low-noise mode at the same output rate. It waits for startup before
+returning. Calling it again replaces the chip's configuration, including
+interrupt routing.
 
-`initialize()` checks identity before resetting the device, selects normal
-operation, sets interface slew rates and big-endian data, then starts both
-sensors in low-noise mode. It waits for reset and startup and keeps the gyro
-on for at least 45 ms before returning. It resets any prior configuration.
-It uses equal accelerometer and gyro output rates to avoid invalid data
-caused by unequal ODRs. Temperature conversion is `raw / 132.48 + 25`.
-Acceleration and gyro sensitivity come from the datasheet tables, including
-the published rounded gyro scale factors.
+For repeated readings, wait for `imu.data_ready()` or a GPIO interrupt.
+Repeated reads without fresh data can return the same sample.
+`InvalidSampleError` means the chip marked a channel as invalid; skip that
+reading and wait for the next sample.
 
-Supported settings (ranges mean plus/minus):
+`read_raw()` returns signed sensor counts in a `RawSample` with temperature,
+acceleration, and gyroscope fields. `read_sample()` returns a `Sample` in
+engineering units and applies any loaded calibration. Both use one
+contiguous 14-byte burst. Calibration leaves raw counts unchanged.
 
-| Setting | Values |
+For SPI, wrap an open `spidev.SpiDev` in `SPITransport(spi)`. The
+[SPI example](examples/read_spi.py) includes setup and cleanup.
+
+## Configure INT1 and INT2
+
+Configure GPIO interrupts after `initialize()`. Either sensor output can
+connect to a host GPIO supported by the GPIO adapter. Pi GPIO numbers use
+BCM numbering, not physical header positions.
+
+The example below assumes INT1 is wired to BCM GPIO17 and INT2 is unused.
+The numbers are examples and must match the actual wiring:
+
+```python
+# imu has already been initialized.
+with imu.interrupt(int1_gpio=17, int2_gpio=None) as irq:
+    if irq.wait(timeout=2) and imu.data_ready():
+        sample = imu.read_sample()
+```
+
+Either pin or both can be mapped. For example, `int1_gpio=None, int2_gpio=22`
+uses only INT2 on GPIO22. `irq.wait()` returns `True` when either mapped input
+becomes active, or `False` when its timeout expires. Read `imu.data_ready()`
+to acknowledge the latched interrupt before taking the sample.
+
+The handler uses push-pull, latched, active-high outputs by default. Pass
+`active_high=False` for active-low outputs. Both pins report data-ready;
+separate event types are not routed to each pin. GPIO callbacks wake the
+waiting thread, which performs sensor reads.
+
+A `with` block releases the host GPIOs on exit. Without a context manager,
+call `irq.close()` explicitly. Setup briefly stops and restarts the sensors
+because the interrupt registers must be changed while they are off. Close
+the handler before reinitializing, then configure interrupts again afterward.
+
+For a different host GPIO library, use
+`imu.configure_data_ready_interrupt(1, ...)` or `(2, ...)` to configure the
+sensor output and handle host input separately. The supplied handler also
+accepts a gpiozero `pin_factory`.
+
+## Calibration
+
+Keep the board still while measuring gyro zero-rate offsets:
+
+```python
+# imu has already been initialized.
+calibration = imu.calibrate(samples=500, settle=2, output='calibration.json')
+```
+
+This waits two seconds, collects 500 fresh readings, and saves the offsets.
+At 100 Hz, capture takes about five seconds. The result applies to subsequent
+`read_sample()` calls. Omit `output` to keep it in memory without saving.
+The method returns a `Calibration` object.
+
+To collect through a configured interrupt handler:
+
+```python
+with imu.interrupt(int1_gpio=17) as irq:
+    calibration = imu.calibrate(output='calibration.json', interrupts=irq)
+```
+
+On later runs, load the file when creating the driver:
+
+```python
+from icm40609 import Calibration
+
+calibration = Calibration.load('calibration.json')
+imu = ICM40609(transport, calibration=calibration)
+imu.initialize()
+```
+
+For an existing driver, assign `imu.calibration = calibration`. Assign `None`
+to disable corrections. An in-memory result can be saved later with
+`calibration.save('calibration.json')`. Recalibration measures uncorrected
+readings so offsets do not stack. If capture or saving fails, the previous
+calibration and output file stay intact.
+
+The [interrupt and calibration example](examples/interrupt_calibration.py)
+loads `calibration.json` if present and captures gyro offsets on its first
+run. Set its GPIO constants to match the board before running it.
+
+### Accelerometer offsets
+
+Gyro calibration works in any stationary orientation. Accelerometer offset
+calibration needs a known pose to account for gravity:
+
+```python
+# Position the sensor so Z reads +1 g and X/Y read 0 g.
+imu.calibrate(gravity_axis='+z', output='calibration.json')
+```
+
+Supported directions are `+x`, `-x`, `+y`, `-y`, `+z`, and `-z`, using the
+sensor package axes. For `-z`, the expected Z reading is -1 g. Calibration
+preserves gravity in measurements.
+
+This single-pose method estimates offsets. It does not correct scale,
+alignment, or temperature drift. Calibrate near the operating temperature
+and keep the saved file with the physical sensor it belongs to. See
+[Analog Devices AN-1057](https://www.analog.com/en/resources/app-notes/an-1057.html)
+for background on gravity-based calibration.
+
+Calibration requires at least 100 readings. It rejects obvious motion using
+per-axis standard deviation limits of 0.02 g and 0.5 deg/s, mean gyro magnitude
+no greater than 5 deg/s, and mean acceleration between 0.85 and 1.15 g.
+Slow constant rotation can still look like gyro bias, so the board must
+remain still throughout capture.
+
+## Ranges and output rates
+
+| Argument | Supported values |
 | --- | --- |
 | `accel_range_g` | 4, 8, 16, 32 |
 | `gyro_range_dps` | 15.625, 31.25, 62.5, 125, 250, 500, 1000, 2000 |
-| `odr_hz` (both sensors) | 12.5, 25, 50, 100, 200, 500, 1000, 2000, 4000, 8000, 16000, 32000 |
+| `odr_hz` | 12.5, 25, 50, 100, 200, 500, 1000, 2000, 4000, 8000, 16000, 32000 |
 
-`configure(accel_range_g=16, gyro_range_dps=2000, odr_hz=100)` replaces all
-three settings, preserves reserved bits, and waits one sample period plus
-30 ms when already running. Filter settling may take longer. Bus failure
-during configuration invalidates reading state; call `initialize()` again.
+Ranges mean plus/minus. Defaults are ±16 g, ±2000 deg/s, and 100 Hz.
+To change them after initialization:
 
-`read_raw()` returns a frozen `RawSample` with signed integer temperature,
-acceleration tuple and gyroscope tuple. `read_sample()` returns a frozen
-`Sample` in engineering units. Both use one contiguous 14-byte burst.
-`InvalidSampleError` means a channel contained the chip's invalid-data
-sentinel; retry after a new sample. Repeated reads can return the same sample.
+```python
+imu.configure(accel_range_g=8, gyro_range_dps=500, odr_hz=200)
+```
 
-`data_ready()` polls bit 3 of INT_STATUS. **Reading that register clears
-all its interrupt flags**, so coordinate with any other interrupt handling.
-`read_register(address, bank=0)` provides diagnostic access to banks 0-4;
-status registers can have read side effects. `stop()` disables accel and
-gyro but does not close the bus or disable the temperature sensor.
+Each call sets all three values; omitted arguments use their defaults.
+When running, the driver waits one sample period plus 30 ms after the change.
+Filters may need longer to settle. If a bus error interrupts configuration,
+call `initialize()` before reading again.
 
-Use one driver instance per chip, with exclusive register ownership. Calls
-through that instance are serialized. Do not modify registers through
-another program while using it; scaling and bank selection assume exclusive
-access. The caller owns the bus and closes it after `stop()`.
+A supported output rate does not guarantee that Python can capture every
+sample at that rate. This version reads registers directly and has no FIFO
+support.
 
-## Other boards / adapters
+## Wiring
 
-Implement the following object and pass it to `ICM40609(transport)`:
+Follow the board schematic and the datasheet's application circuit for
+supply, decoupling, and pin connections. These tables cover bus signals,
+not a complete bare-chip circuit. Match VDDIO and host logic levels;
+do not apply 5 V logic to the sensor.
+
+| I2C signal | Pi GPIO (BCM) | Physical header pin |
+| --- | --- | --- |
+| SDA | GPIO2 / SDA1 | 3 |
+| SCL | GPIO3 / SCL1 | 5 |
+| Ground | GND | e.g. 6 |
+
+For I2C, hold nCS high to VDDIO. SDA and SCL need pull-ups to a compatible
+VDDIO rail; account for pull-ups already on the connected boards. Examples
+use bus 1. Set bus speed on the host; the chip supports up to 1 MHz.
+See [I2C address selection](#i2c-addresses-0x68-and-0x69) for AD0 connections
+and automatic address handling.
+
+| 4-wire SPI signal | Pi GPIO (BCM) | Physical header pin |
+| --- | --- | --- |
+| SDI | GPIO10 / MOSI | 19 |
+| SDO | GPIO9 / MISO | 21 |
+| SCLK | GPIO11 / SCLK | 23 |
+| nCS | GPIO8 / CE0 | 24 |
+| Ground | GND | e.g. 6 |
+
+The SPI adapter defaults to mode 0 at 1 MHz and also supports mode 3. Its
+upper limit is 24 MHz; usable speeds depend on the wiring and host.
+Interrupt and FSYNC connections are optional for polling examples.
+
+## Terminal commands
+
+```sh
+python -m icm40609 calibrate --output calibration.json
+python -m icm40609 read --calibration calibration.json
+python -m icm40609 read --count 100
+```
+
+Both commands default to automatic I2C address selection. Use
+`--address 0x68` or `--address 0x69` for a fixed address. Add `--int1-gpio 17`
+or `--int2-gpio 22` when those example pins match the wiring; omit GPIO
+arguments to poll data-ready. Both commands accept `--interface spi`,
+`--bus`, `--cs`, and `--active-low`. For accelerometer calibration in a
+known pose, add `--gravity-axis=+z`.
+
+Run `python -m icm40609 calibrate --help` or `read --help` for the options.
+The installed `icm40609` command is equivalent to `python -m icm40609`.
+
+## Troubleshooting and ownership
+
+| Symptom | What to check |
+| --- | --- |
+| `ModuleNotFoundError: icm40609` | Install into the application's Python environment. Check `python -m pip show icm40609`. |
+| I2C input/output error | Check power, ground, bus number, nCS, pull-ups, and AD0. Enable `address=None` for automatic address handling. |
+| GPIO interrupt timeout | Check BCM versus header numbering, the INT1/INT2 mapping, wiring, and polarity. |
+| Calibration rejects movement | Hold the board still and check orientation for accelerometer calibration. |
+| `InvalidSampleError` | Wait for the next data-ready event and retry the reading. |
+
+Use one driver instance per chip and let it manage the registers. Calls
+through that instance use a lock, but other processes or drivers can still
+change the chip's configuration.
+
+`data_ready()` reads INT_STATUS and clears all its interrupt flags.
+Coordinate that read with other interrupt handling. `read_register(address,
+bank=0)` provides diagnostic access to banks 0-4; some registers have read
+side effects. `stop()` turns off the accelerometer and gyro. The application
+owns and closes the bus; the temperature sensor remains enabled.
+
+## Other boards and testing
+
+A custom transport needs this interface:
 
 ```python
 class MyTransport:
-    interface = 'i2c'  # or 'spi'; selects correct slew rates
+    interface = 'i2c'  # Or 'spi'; this selects the sensor's slew rates.
 
     def read(self, register: int, length: int) -> bytes:
-        # Return exactly length bytes from auto-incrementing registers.
-        # I2C: register-address write followed by repeated-START read.
-        # SPI: send register | 0x80, then clock length bytes under one CS.
+        # Read exactly length bytes, starting at register.
         ...
 
     def write(self, register: int, data: bytes) -> None:
-        # I2C: register byte followed by data in one transaction.
-        # SPI: register & 0x7f followed by data under one CS.
+        # Write data starting at register.
         ...
 ```
 
-Raise `OSError` for transfer failures. CPython is the supported runtime;
-MicroPython/CircuitPython would need adaptations for dataclasses, typing,
-threading and transport APIs. Board independence does not imply those
-runtimes are supported unchanged.
+Pass it to `ICM40609(transport)`. Preserve register auto-increment behavior
+and raise `OSError` for bus errors. I2C reads need a register-pointer write
+followed by a repeated START and read. For SPI, send `register | 0x80` to
+read or `register & 0x7F` to write, with address and data under one chip-select
+assertion.
 
-## Scope and validation
+The supported runtime is CPython. MicroPython and CircuitPython need changes
+for dataclasses, typing, threading, and bus APIs.
 
-This version supports direct polling, range/ODR configuration, raw and
-converted readings, identity checking and shutdown. FIFO, low-power modes,
-interrupt routing, self-test automation, custom filters, FSYNC and bias
-calibration are not implemented. No orientation fusion is included. Data
-rate settings do not guarantee Python/Linux can read every sample at high
-ODRs; FIFO support would be needed for dependable high-rate acquisition.
+To run simulated tests from the checkout:
 
 ```sh
-python -m pip install '.[test]'
+python -m pip install -e '.[test]'
 python -m pytest -q
 ```
 
-Tests use simulated registers and wire transactions: chip ID, timing order,
-normal mode, all ranges and rates, units, invalid samples, short transfers,
-bank switching, configuration failure and I2C/SPI framing. **Not yet tested
-on physical ICM-40609-D hardware.** First bench check: verify ID `0x3B`, then
-check a stationary sensor reads approximately 1 g total acceleration and
-near-zero angular rate; rotate each package axis to verify signs. Keep the
-startup output and any bus errors when reporting issues.
+Tests cover register configuration, ranges, rates, conversions, address
+recovery, calibration, interrupt routing, and GPIO cleanup. Physical testing
+has covered I2C readings, address recovery, gyro calibration, and INT1 on a
+Raspberry Pi. INT2 and SPI have simulated coverage only. FIFO, low-power
+modes, FIFO interrupt routing, automated self-test, custom filters, FSYNC,
+and orientation fusion are not implemented.
 
-Adapter API references: [smbus2 operations](https://smbus2.readthedocs.io/en/latest/operations.html)
-and [spidev project documentation](https://pypi.org/project/spidev/).
+The register map and conversions follow **TDK DS-000330, revision 1.2**.
+The expected ICM-40609-D chip ID is `0x3B`.
+
+References: [TDK datasheet](https://invensense.tdk.com/wp-content/uploads/2022/07/DS-000330-ICM-40609-D-v1.2.pdf),
+[smbus2](https://smbus2.readthedocs.io/en/latest/operations.html),
+[spidev](https://pypi.org/project/spidev/), and
+[gpiozero inputs](https://gpiozero.readthedocs.io/en/stable/api_input.html).
