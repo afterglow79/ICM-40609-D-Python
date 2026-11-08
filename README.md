@@ -11,10 +11,10 @@ This driver is specific to ICM-40609-D (WHO_AM_I `0x3B`), not ICM-42688 or MPU-6
 
 ## Install on the Raspberry Pi
 
-Copy this directory to the Pi. Enable I2C or SPI in `raspi-config`, then:
+Clone this directory to the Pi. Enable I2C or SPI in `raspi-config`, then:
 
 ```sh
-cd ICM-40609-D
+cd ICM-40609-D-Python
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install '.[i2c]'
