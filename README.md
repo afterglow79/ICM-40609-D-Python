@@ -48,6 +48,26 @@ For I2C hold nCS high to VDDIO. AD0 low selects `0x68`; AD0 high selects
 pull-ups already on the Pi or sensor board). Default example uses bus 1.
 Configure I2C frequency in the host; the device supports up to 1 MHz.
 
+The I2C example uses `I2CTransport(bus, address=None)` to check both addresses.
+Auto mode verifies WHO_AM_I `0x3B` before selecting an address and checks the
+cached address before each bank-0 transfer. If an operation fails, it checks
+both addresses again and retries, with a maximum of three attempts and 10 ms
+between attempts. This covers address changes during startup, reset and
+normal readings. `transport.address` reports the most recently selected address.
+Passing `address=0x68` or `address=0x69` keeps the original fixed-address behavior.
+
+Auto mode assumes one ICM-40609-D on the two addresses. If both respond with
+ID `0x3B` during discovery, it asks you to choose a fixed address. Devices
+with other IDs are not selected for register writes. Identity probes read
+register `0x75`, so account for that if another device at either address has
+read side effects. Bank-0 operation is required for discovery; an address
+failure during diagnostics in another bank requires reinitialization.
+
+AD0 should have a defined logic level. On the custom PCB tested here, a
+floating AD0 caused the address to change after reset. Auto mode is a
+workaround for that board; it cannot resolve address collisions or guarantee
+communication if the pin changes level during a transaction.
+
 | Sensor signal (4-wire SPI) | Pi GPIO (BCM) | Physical header pin |
 | --- | --- | --- |
 | SDA / SDI | GPIO10 / MOSI | 19 |
@@ -122,6 +142,101 @@ through that instance are serialized. Do not modify registers through
 another program while using it; scaling and bank selection assume exclusive
 access. The caller owns the bus and closes it after `stop()`.
 
+## Calibration and GPIO interrupts in Python
+
+Install the optional GPIO adapter on the Pi with `python -m pip install '.[i2c,gpio]'`.
+You can configure everything in Python; command-line arguments are optional.
+For your board, INT1 connects to BCM GPIO27 (physical header pin 13), and INT2
+is unwired. Both mappings accept any input GPIO supported by your host and
+gpiozero pin factory. Leave an unused interrupt as `None`.
+
+```python
+from smbus2 import SMBus
+from icm40609 import ICM40609, I2CTransport, Calibration
+
+with SMBus(1) as bus:
+    imu = ICM40609(I2CTransport(bus, address=None))
+    imu.initialize(odr_hz=100)
+    try:
+        with imu.interrupt(int1_gpio=27, int2_gpio=None) as irq:
+            # Keep the board still. This applies the result and saves it.
+            calibration = imu.calibrate(
+                samples=500, settle=2, output='calibration.json', interrupts=irq
+            )
+            if irq.wait(timeout=2) and imu.data_ready():
+                print(imu.read_sample())
+    finally:
+        imu.stop()
+```
+
+On later runs, load the file instead of recalibrating:
+
+```python
+calibration = Calibration.load('calibration.json')
+imu = ICM40609(transport, calibration=calibration)
+imu.initialize()
+```
+
+You can also set `imu.calibration = calibration` on an existing driver, or
+`imu.calibration = None` to turn corrections off. `imu.calibrate()` works
+without interrupts too: omit `interrupts=irq` to poll data-ready instead.
+It returns a `Calibration`; omit `output` for an in-memory result, then call
+`calibration.save(path)` when you want to persist it. Failed calibration
+leaves the previous offsets and output file intact.
+
+By default, calibration measures only gyro zero-rate bias, in any stationary
+orientation. For accelerometer offsets as well, supply `gravity_axis='+z'`
+(or `'-z'`, `'+x'`, `'-x'`, `'+y'`, `'-y'`). Position the sensor so the chosen
+axis has the specified +1 g or -1 g reading, with the other two axes at 0 g.
+Use the sensor package axes, not the Pi axes. The correction preserves gravity.
+This single-pose method estimates offsets, not scale, alignment or temperature
+compensation; repeat calibration at the operating temperature when needed.
+See [Analog Devices AN-1057](https://www.analog.com/en/resources/app-notes/an-1057.html)
+for the gravity reference used by single-point accelerometer calibration.
+
+Calibration needs at least 100 fresh readings (default 500, approximately five
+seconds at 100 Hz), after a default two-second settling wait. It rejects
+obvious motion using per-axis standard deviation limits of 0.02 g and
+0.5 deg/s, mean gyro magnitude over 5 deg/s, and mean acceleration outside
+0.85-1.15 g. These checks cannot prove the board is stationary: slow constant
+rotation can look like gyro bias. Keep it still throughout capture.
+
+`imu.interrupt(...)` returns a `GPIOInterrupts` handler. Use it in a `with`
+block, or call `irq.close()` yourself. `irq.wait(timeout)` waits for either
+mapped pin; check `imu.data_ready()` before reading to acknowledge the
+latched interrupt. GPIO callbacks only wake the waiting thread. Both pins
+report data-ready; this version does not route separate event types to each.
+The driver configures push-pull, latched, active-high outputs by default;
+pass `active_high=False` for active-low outputs. Match the sensor's output
+logic voltage to the host GPIO input requirements.
+
+Interrupt setup briefly stops and restarts the sensors because the datasheet
+requires those register changes while they are off. Configure it after
+`initialize()`. Resetting the sensor clears its interrupt routing, so close
+the handler before reinitializing and configure it again afterward. Advanced
+users can call `imu.configure_data_ready_interrupt(1, ...)` or `(2, ...)`
+and use a different host GPIO library instead. GPIO support is optional and
+does not affect the board-independent register driver.
+
+`examples/interrupt_calibration.py` shows a full program with editable GPIO
+constants. It loads `calibration.json` if present, or captures gyro calibration
+on its first run. Calibration JSON is specific to the physical sensor; move
+it only with that sensor, not to another board.
+
+## Calibration from the terminal
+
+```sh
+python -m icm40609 calibrate --int1-gpio 27 --output calibration.json
+python -m icm40609 read --int1-gpio 27 --calibration calibration.json
+# Optional accelerometer calibration in a known pose:
+python -m icm40609 calibrate --int1-gpio 27 --gravity-axis=+z
+```
+
+The same commands are available as `icm40609` after installation. Both support
+`--interface spi`, `--bus`, `--cs`, `--int2-gpio`, and `--active-low`. Without
+GPIO arguments they poll I2C/SPI for data-ready. `read --count 100` stops after
+100 readings. A missing interrupt times out with a wiring/mapping error.
+
 ## Other boards / adapters
 
 Implement the following object and pass it to `ICM40609(transport)`:
@@ -151,8 +266,8 @@ runtimes are supported unchanged.
 
 This version supports direct polling, range/ODR configuration, raw and
 converted readings, identity checking and shutdown. FIFO, low-power modes,
-interrupt routing, self-test automation, custom filters, FSYNC and bias
-calibration are not implemented. No orientation fusion is included. Data
+FIFO interrupt routing, self-test automation, custom filters and FSYNC are
+not implemented. No orientation fusion is included. Data
 rate settings do not guarantee Python/Linux can read every sample at high
 ODRs; FIFO support would be needed for dependable high-rate acquisition.
 
@@ -163,8 +278,10 @@ python -m pytest -q
 
 Tests use simulated registers and wire transactions: chip ID, timing order,
 normal mode, all ranges and rates, units, invalid samples, short transfers,
-bank switching, configuration failure and I2C/SPI framing. **Not yet tested
-on physical ICM-40609-D hardware.** First bench check: verify ID `0x3B`, then
+bank switching, configuration failure, I2C/SPI framing and automatic address
+recovery. I2C initialization and live measurements have been checked on a
+physical ICM-40609-D connected to a Raspberry Pi. SPI still needs hardware
+testing. First bench check: verify ID `0x3B`, then
 check a stationary sensor reads approximately 1 g total acceleration and
 near-zero angular rate; rotate each package axis to verify signs. Keep the
 startup output and any bus errors when reporting issues.

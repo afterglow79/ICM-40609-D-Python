@@ -7,9 +7,12 @@ from math import pi
 import struct
 from threading import RLock
 import time
-from typing import Callable, Tuple
+from typing import Callable, Optional, Tuple, TYPE_CHECKING
 
 from .transport import RegisterTransport
+
+if TYPE_CHECKING:
+    from .calibration import Calibration
 
 Vector3 = Tuple[float, float, float]
 RawVector3 = Tuple[int, int, int]
@@ -64,10 +67,12 @@ class ICM40609:
     """
 
     def __init__(self, transport: RegisterTransport, *,
-                 sleep: Callable[[float], None] = time.sleep):
+                 sleep: Callable[[float], None] = time.sleep,
+                 calibration: Optional[Calibration] = None):
         if transport.interface not in ('i2c', 'spi'):
             raise ValueError("transport.interface must be 'i2c' or 'spi'")
         self.transport = transport
+        self.calibration = calibration
         self._sleep = sleep
         self._lock = RLock()
         self._bank = None
@@ -172,9 +177,95 @@ class ICM40609:
             if self._running:
                 self._sleep(1 / odr_hz + 0.030)
 
+    def configure_data_ready_interrupt(self, pin: int, *, enabled: bool = True,
+                                       active_high: bool = True, latched: bool = True,
+                                       push_pull: bool = True) -> None:
+        """Route fresh-data interrupts to sensor INT1 or INT2.
+
+        This briefly stops both sensors because interrupt registers must be
+        changed while they are off. Other settings on the second pin stay
+        intact. In latched mode, read data_ready() to clear the interrupt.
+        Host GPIO numbers belong to your GPIO adapter, not this method.
+        """
+        if type(pin) is not int or pin not in (1, 2):
+            raise ValueError('Interrupt pin must be 1 or 2')
+        with self._lock:
+            self._require_running()
+            power = self._read(0x4E)[0]
+            self._running = False
+            try:
+                self._write(0x4E, power & ~0x0F)
+                shift = 0 if pin == 1 else 3
+                value = (int(latched) << 2 | int(push_pull) << 1 | int(active_high)) << shift
+                self._update(0x14, 7 << shift, value)
+                # Short pulses also work at low rates, so later ODR changes
+                # won't need another interrupt-register write while running.
+                # Clearing INT_ASYNC_RESET is required for both output pins.
+                self._update(0x64, 0x70, 0x60)
+                self._update(0x63, 0x30, 0)  # Clear latched data-ready on status reads.
+                source = 0x65 if pin == 1 else 0x68
+                # Reset-done is enabled on INT1 at reset. Remove it so that
+                # this pin reports fresh data rather than the earlier reset.
+                self._update(source, 0x18, 0x08 if enabled else 0)
+                self._read(0x2D)
+                self._write(0x4E, power)
+                self._sleep(0.12)  # Covers startup, minimum on-time and the slowest ODR.
+            except OSError:
+                # Leave reads disabled until initialize() restores a known state.
+                raise
+            self._running = True
+
     def _require_running(self) -> None:
         if not self._running:
             raise RuntimeError('Call initialize() before reading samples')
+
+    def interrupt(self, *, int1_gpio=None, int2_gpio=None, active_high=True,
+                  pin_factory=None):
+        """Map INT1 and/or INT2 to host GPIOs and return a waitable handler.
+
+        Example: with imu.interrupt(int1_gpio=27) as irq: ...
+        Pi GPIOs use BCM numbering. The context manager releases the inputs;
+        if you don't use a with block, call the handler's close() yourself.
+        """
+        from .interrupts import GPIOInterrupts
+        return GPIOInterrupts(self, int1_gpio=int1_gpio, int2_gpio=int2_gpio,
+                              active_high=active_high, pin_factory=pin_factory)
+
+    def calibrate(self, *, samples=500, settle=2.0, gravity_axis=None,
+                  output=None, interrupts=None, timeout=None):
+        """Measure, apply and optionally save stationary offsets.
+
+        Keep the board still. Without gravity_axis, only gyro offsets change.
+        Pass '+z', '-z', '+x', '-x', '+y' or '-y' for accelerometer offsets
+        in a known pose. Raw readings stay unchanged. If capture or saving
+        fails, the previous calibration remains in use.
+        """
+        from math import isfinite
+        from .calibration import Calibration, GRAVITY_AXES, collect_samples
+        if type(samples) is not int or samples < 100:
+            raise ValueError('Collect at least 100 samples')
+        if not isfinite(settle) or settle < 0:
+            raise ValueError('settle must be finite and nonnegative')
+        if gravity_axis is not None and gravity_axis not in GRAVITY_AXES:
+            raise ValueError('Unknown gravity axis')
+        if timeout is None:
+            timeout = max(10, samples / 100 * 3)
+        if not isfinite(timeout) or timeout <= 0:
+            raise ValueError('timeout must be finite and positive')
+        with self._lock:
+            self._require_running()
+            previous = self.calibration
+            self.calibration = None
+            try:
+                self._sleep(settle)
+                readings = collect_samples(self, samples, timeout=timeout, interrupts=interrupts)
+                result = Calibration.from_samples(readings, gravity_axis=gravity_axis)
+                if output is not None:
+                    result.save(output)
+            finally:
+                self.calibration = previous
+            self.calibration = result
+            return result
 
     def read_raw(self) -> RawSample:
         """Read temperature, XYZ acceleration and XYZ gyro in one 14-byte burst.
@@ -194,9 +285,10 @@ class ICM40609:
         """Return temperature (C), acceleration (g), and angular rate (deg/s)."""
         with self._lock:
             raw = self.read_raw()
-            return Sample(raw.temperature / 132.48 + 25,
-                          tuple(v / self._accel_scale for v in raw.acceleration),
-                          tuple(v / self._gyro_scale for v in raw.gyroscope))
+            sample = Sample(raw.temperature / 132.48 + 25,
+                            tuple(v / self._accel_scale for v in raw.acceleration),
+                            tuple(v / self._gyro_scale for v in raw.gyroscope))
+            return self.calibration.apply(sample) if self.calibration is not None else sample
 
     def read_register(self, register: int, *, bank: int = 0) -> int:
         """Read a register for diagnostics. Reading status registers clears their flags."""
